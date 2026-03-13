@@ -1,23 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 from pathlib import Path
 
 from .cache import JsonCache
-from .category_optimizer import optimize_categories
+from .duplicates import find_duplicate_candidates
 from .extractor import discover_pdfs, extract_pdf_record
-from .llm_classifier import OpenAICompatibleLLM
-from .models import FileReportItem, RunReport, RunSummary
+from .llm_classifier import ClusterNamer
+from .models import Cluster, FileReportItem, RunReport, RunSummary
 from .organizer import execute_action, plan_file_action
-from .utils import ensure_dir, setup_logging
+from .semantic_grouping import build_clusters, refine_cluster_sizes
+from .utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LLM-driven PDF organizer")
+    parser = argparse.ArgumentParser(description="Cluster-based PDF organizer")
     parser.add_argument("root_dir", type=Path, help="Root directory containing PDFs")
 
     mode = parser.add_mutually_exclusive_group()
@@ -26,10 +28,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--output", type=Path, help="Write JSON report to this path")
     parser.add_argument("--cache-dir", type=Path, default=Path(".pdf_org_cache"), help="Cache directory")
-    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model name")
-    parser.add_argument("--max-pages", type=int, default=3, help="Max pages to extract for preview")
+    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model used only for cluster naming")
+    parser.add_argument("--max-pages", type=int, default=3, help="Max pages to extract per PDF")
+    parser.add_argument("--min-cluster-size", type=int, default=2, help="Minimum target cluster size")
+    parser.add_argument("--large-cluster-threshold", type=int, default=15, help="Split clusters larger than this")
+    parser.add_argument("--duplicate-threshold", type=float, default=0.94, help="Near-duplicate cosine threshold")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     return parser
+
+
+def _cluster_cache_key(member_sha256: list[str]) -> str:
+    payload = "\n".join(sorted(member_sha256))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def main() -> int:
@@ -44,9 +54,8 @@ def main() -> int:
     if not args.apply and not args.dry_run:
         apply = False
 
-    ensure_dir(args.cache_dir)
     cache = JsonCache(args.cache_dir)
-    llm = OpenAICompatibleLLM(model=args.model, cache=cache)
+    namer = ClusterNamer(model=args.model, cache=cache)
 
     started_at = RunReport.now_iso()
     summary = RunSummary()
@@ -57,44 +66,42 @@ def main() -> int:
     summary.scanned_files = len(pdf_paths)
     logger.info("Discovered %s PDF files", len(pdf_paths))
 
-    records = []
-    for path in pdf_paths:
-        record = extract_pdf_record(path=path, root_dir=root_dir, max_pages=args.max_pages)
-        records.append(record)
+    records = [extract_pdf_record(path=path, root_dir=root_dir, max_pages=args.max_pages) for path in pdf_paths]
+    records_by_sha = {r.sha256: r for r in records}
+
+    for record in records:
         if record.error:
             summary.extracted_failed += 1
             warnings.append(f"Extraction issue for {record.relative_path}: {record.error}")
         else:
             summary.extracted_success += 1
 
-    classifications = {}
-    for record in records:
-        try:
-            classification = llm.classify_document(record)
-            classifications[record.sha256] = classification
-            summary.classified_success += 1
-        except Exception as exc:  # noqa: BLE001
-            summary.classified_failed += 1
-            errors.append(f"Classification failure for {record.relative_path}: {exc}")
+    cluster_plans, _ = build_clusters(records, min_cluster_size=args.min_cluster_size)
+    cluster_plans = refine_cluster_sizes(
+        cluster_plans,
+        records_by_sha=records_by_sha,
+        large_cluster_threshold=args.large_cluster_threshold,
+    )
 
-    optimization = optimize_categories(list(classifications.values()), llm)
-    mapping = optimization.category_mapping or {}
+    clusters: list[Cluster] = []
+    cluster_name_by_sha: dict[str, tuple[str, str]] = {}
+    for plan in cluster_plans:
+        members = [records_by_sha[sha] for sha in plan.member_sha256 if sha in records_by_sha]
+        folder_name, reason = namer.name_cluster(_cluster_cache_key(plan.member_sha256), members)
+        clusters.append(Cluster(cluster_id=plan.cluster_id, member_sha256=plan.member_sha256, folder_name=folder_name, short_reason=reason))
+        for sha in plan.member_sha256:
+            cluster_name_by_sha[sha] = (plan.cluster_id, folder_name)
+
+    summary.clusters_created = len(clusters)
+
+    duplicates = find_duplicate_candidates(records, near_threshold=args.duplicate_threshold)
+    summary.exact_duplicates = sum(1 for d in duplicates if d.reason == "exact_sha256_match")
+    summary.likely_duplicates = sum(1 for d in duplicates if d.reason != "exact_sha256_match")
 
     file_reports: list[FileReportItem] = []
     for record in records:
-        classification = classifications.get(record.sha256)
-        if not classification:
-            file_reports.append(
-                FileReportItem(
-                    pdf=record,
-                    classification=None,
-                    optimized_category="uncategorized",
-                    action=None,
-                )
-            )
-            continue
-
-        action = plan_file_action(root_dir, record, classification, mapping)
+        cluster_id, cluster_name = cluster_name_by_sha.get(record.sha256, ("cluster_uncategorized", "misc"))
+        action = plan_file_action(root_dir=root_dir, pdf=record, folder_name=cluster_name)
         action = execute_action(action, apply=apply)
 
         summary.actions_planned += 1
@@ -104,22 +111,9 @@ def main() -> int:
             summary.actions_failed += 1
             errors.append(f"Action failed for {record.relative_path}: {action.error}")
 
-        logger.info(
-            "[%s] %s -> category=%s target=%s",
-            "APPLY" if apply else "DRY-RUN",
-            record.relative_path,
-            action.optimized_category,
-            action.target_path,
-        )
+        logger.info("[%s] %s -> folder=%s target=%s", "APPLY" if apply else "DRY-RUN", record.relative_path, action.folder_name, action.target_path)
 
-        file_reports.append(
-            FileReportItem(
-                pdf=record,
-                classification=classification,
-                optimized_category=action.optimized_category,
-                action=action,
-            )
-        )
+        file_reports.append(FileReportItem(pdf=record, cluster_id=cluster_id, cluster_name=cluster_name, action=action))
 
     finished_at = RunReport.now_iso()
     report = RunReport(
@@ -130,8 +124,9 @@ def main() -> int:
         model=args.model,
         max_pages=args.max_pages,
         summary=summary,
-        category_optimization=optimization,
+        clusters=clusters,
         files=file_reports,
+        duplicates=duplicates,
         errors=errors,
         warnings=warnings,
     )

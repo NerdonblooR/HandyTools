@@ -8,26 +8,18 @@ from .utils import ensure_dir
 
 
 class JsonCache:
-    """Simple JSON-file cache for document and optimization LLM responses."""
+    """Simple JSON-file cache for reusable model outputs."""
 
     def __init__(self, cache_dir: Path):
         self.cache_dir = cache_dir
-        self.doc_dir = cache_dir / "documents"
-        self.opt_dir = cache_dir / "optimizations"
-        ensure_dir(self.doc_dir)
-        ensure_dir(self.opt_dir)
+        self.cluster_name_dir = cache_dir / "cluster_names"
+        ensure_dir(self.cluster_name_dir)
 
-    def get_document(self, sha256: str) -> dict[str, Any] | None:
-        return self._read_json(self.doc_dir / f"{sha256}.json")
+    def get_cluster_name(self, cluster_key: str) -> dict[str, Any] | None:
+        return self._read_json(self.cluster_name_dir / f"{cluster_key}.json")
 
-    def set_document(self, sha256: str, payload: dict[str, Any]) -> None:
-        self._write_json(self.doc_dir / f"{sha256}.json", payload)
-
-    def get_optimization(self, categories_hash: str) -> dict[str, Any] | None:
-        return self._read_json(self.opt_dir / f"{categories_hash}.json")
-
-    def set_optimization(self, categories_hash: str, payload: dict[str, Any]) -> None:
-        self._write_json(self.opt_dir / f"{categories_hash}.json", payload)
+    def set_cluster_name(self, cluster_key: str, payload: dict[str, Any]) -> None:
+        self._write_json(self.cluster_name_dir / f"{cluster_key}.json", payload)
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
