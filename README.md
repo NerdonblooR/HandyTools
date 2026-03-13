@@ -92,6 +92,8 @@ If neither flag is set, behavior is dry-run by default.
 - `--cache-dir PATH` — Cache directory (default: `.pdf_org_cache`).
 - `--model NAME` — LLM model name (default: `gpt-4o-mini`).
 - `--max-pages N` — Max pages used for text preview extraction (default: `3`).
+- `--min-docs-per-category N` — Minimum documents allowed per final category (default: `2`).
+- `--max-docs-per-category N` — Maximum documents allowed per final category (default: `25`).
 - `--verbose` — Enable verbose logging.
 
 ### Example commands

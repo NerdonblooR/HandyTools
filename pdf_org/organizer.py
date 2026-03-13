@@ -15,19 +15,22 @@ def plan_file_action(
     pdf: PdfRecord,
     classification: DocumentClassification,
     category_mapping: dict[str, str],
+    optimized_category: str | None = None,
 ) -> FileAction:
     """Plan a safe move+rename action based on optimized category and title."""
     raw_category = normalize_category_name(classification.suggested_category)
-    optimized_category = normalize_category_name(category_mapping.get(raw_category, "uncategorized"))
+    final_category = normalize_category_name(
+        optimized_category or category_mapping.get(raw_category, "uncategorized")
+    )
 
-    category_dir = root_dir / optimized_category
+    category_dir = root_dir / final_category
     title = sanitize_filename(classification.title) if classification.title else sanitize_filename(Path(pdf.file_path).stem)
     target = unique_target_path(category_dir, title, ext=Path(pdf.file_path).suffix.lower() or ".pdf")
 
     return FileAction(
         source_path=pdf.file_path,
         target_path=str(target),
-        optimized_category=optimized_category,
+        optimized_category=final_category,
         title_used=title,
         dry_run=True,
         executed=False,
