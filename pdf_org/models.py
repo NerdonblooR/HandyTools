@@ -40,6 +40,9 @@ class CategoryOptimizationResult:
     category_mapping: dict[str, str]
     normalized_categories: list[str]
     short_reason: str
+    document_category_mapping: dict[str, str] = field(default_factory=dict)
+    operations_log: list[str] = field(default_factory=list)
+    category_sizes: dict[str, int] = field(default_factory=dict)
     raw_response: str | None = None
     from_cache: bool = False
 

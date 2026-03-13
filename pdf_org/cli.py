@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-dir", type=Path, default=Path(".pdf_org_cache"), help="Cache directory")
     parser.add_argument("--model", default="gpt-4o-mini", help="LLM model name")
     parser.add_argument("--max-pages", type=int, default=3, help="Max pages to extract for preview")
+    parser.add_argument("--min-docs-per-category", type=int, default=2, help="Minimum documents per final category")
+    parser.add_argument("--max-docs-per-category", type=int, default=25, help="Maximum documents per final category")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     return parser
 
@@ -67,22 +69,42 @@ def main() -> int:
         else:
             summary.extracted_success += 1
 
-    classifications = {}
-    for record in records:
+    classifications_by_sha = {}
+    classified_entries: list[int] = []
+    classifications_in_order = []
+    for record_index, record in enumerate(records):
         try:
             classification = llm.classify_document(record)
-            classifications[record.sha256] = classification
+            classifications_by_sha[record.sha256] = classification
+            classifications_in_order.append(classification)
+            classified_entries.append(record_index)
             summary.classified_success += 1
         except Exception as exc:  # noqa: BLE001
             summary.classified_failed += 1
             errors.append(f"Classification failure for {record.relative_path}: {exc}")
 
-    optimization = optimize_categories(list(classifications.values()), llm)
+    optimization = optimize_categories(
+        classifications_in_order,
+        llm,
+        min_docs_per_category=args.min_docs_per_category,
+        max_docs_per_category=args.max_docs_per_category,
+    )
     mapping = optimization.category_mapping or {}
+    per_doc_mapping = optimization.document_category_mapping or {}
+    per_record_mapping: dict[int, str] = {}
+    for classification_idx_str, optimized_category in per_doc_mapping.items():
+        try:
+            classification_idx = int(classification_idx_str)
+        except ValueError:
+            continue
+        if classification_idx < 0 or classification_idx >= len(classified_entries):
+            continue
+        record_index = classified_entries[classification_idx]
+        per_record_mapping[record_index] = optimized_category
 
     file_reports: list[FileReportItem] = []
-    for record in records:
-        classification = classifications.get(record.sha256)
+    for idx, record in enumerate(records):
+        classification = classifications_by_sha.get(record.sha256)
         if not classification:
             file_reports.append(
                 FileReportItem(
@@ -94,7 +116,8 @@ def main() -> int:
             )
             continue
 
-        action = plan_file_action(root_dir, record, classification, mapping)
+        optimized_category = per_record_mapping.get(idx)
+        action = plan_file_action(root_dir, record, classification, mapping, optimized_category=optimized_category)
         action = execute_action(action, apply=apply)
 
         summary.actions_planned += 1

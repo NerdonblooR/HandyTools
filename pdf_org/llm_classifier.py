@@ -30,6 +30,11 @@ class BaseLLMClient(ABC):
     def optimize_categories(self, raw_categories: list[str]) -> CategoryOptimizationResult:
         raise NotImplementedError
 
+    def suggest_category_name(self, category_candidates: list[str], context_snippets: list[str]) -> str:
+        """Suggest a single normalized category name; fallback is deterministic and local."""
+        preferred = next((c for c in category_candidates if c and c.strip()), "uncategorized")
+        return normalize_category_name(preferred)
+
 
 class OpenAICompatibleLLM(BaseLLMClient):
     """OpenAI-compatible chat-completions client with robust JSON parsing and caching."""
@@ -118,6 +123,24 @@ class OpenAICompatibleLLM(BaseLLMClient):
             result.normalized_categories = sorted(set(result.category_mapping.values()))
         self.cache.set_optimization(categories_hash, self._optimization_to_payload(result))
         return result
+
+    def suggest_category_name(self, category_candidates: list[str], context_snippets: list[str]) -> str:
+        options = [normalize_category_name(c) for c in category_candidates if c and c.strip()]
+        if not self.api_key or not options:
+            return super().suggest_category_name(options, context_snippets)
+
+        prompt = (
+            "Pick a concise snake_case category name for this document cluster. "
+            "Return JSON with key: category_name.\n\n"
+            f"Name candidates: {json.dumps(options[:10], ensure_ascii=False)}\n"
+            f"Context snippets: {json.dumps(context_snippets[:12], ensure_ascii=False)}"
+        )
+        raw = self._chat_json(prompt)
+        parsed = extract_json_object(raw or "")
+        if not parsed:
+            return super().suggest_category_name(options, context_snippets)
+
+        return normalize_category_name(str(parsed.get("category_name") or options[0]))
 
     def _chat_json(self, prompt: str) -> str | None:
         if requests is None:
@@ -221,6 +244,13 @@ class OpenAICompatibleLLM(BaseLLMClient):
             category_mapping=mapping,
             normalized_categories=normalized,
             short_reason=str(payload.get("short_reason") or "").strip(),
+            document_category_mapping={
+                str(k): normalize_category_name(str(v))
+                for k, v in (payload.get("document_category_mapping") or {}).items()
+                if str(k).strip()
+            },
+            operations_log=[str(item) for item in (payload.get("operations_log") or []) if str(item).strip()],
+            category_sizes=_parse_category_sizes(payload.get("category_sizes") or {}),
             raw_response=raw_response if raw_response is not None else payload.get("raw_response"),
             from_cache=from_cache,
         )
@@ -243,6 +273,21 @@ class OpenAICompatibleLLM(BaseLLMClient):
             "category_mapping": result.category_mapping,
             "normalized_categories": result.normalized_categories,
             "short_reason": result.short_reason,
+            "document_category_mapping": result.document_category_mapping,
+            "operations_log": result.operations_log,
+            "category_sizes": result.category_sizes,
             "raw_response": result.raw_response,
         }
 
+
+def _parse_category_sizes(payload: dict[Any, Any]) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for key, value in payload.items():
+        norm_key = normalize_category_name(str(key))
+        if not norm_key:
+            continue
+        try:
+            parsed[norm_key] = int(value)
+        except Exception:  # noqa: BLE001
+            continue
+    return parsed
