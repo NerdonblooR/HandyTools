@@ -7,7 +7,7 @@ from typing import Any
 
 @dataclass
 class PdfRecord:
-    """Extracted content and metadata for a PDF."""
+    """Raw extracted PDF information used for classification and reporting."""
 
     file_path: str
     relative_path: str
@@ -15,48 +15,42 @@ class PdfRecord:
     sha256: str
     page_count: int | None
     metadata_title: str | None
-    first_page_text: str
-    content_snippet: str
-    detected_title: str
+    text_preview: str
     error: str | None = None
 
-    @property
-    def semantic_text(self) -> str:
-        """Concise text used for semantic vectorization and clustering."""
-        return "\n".join(
-            part
-            for part in [self.detected_title, self.metadata_title or "", self.first_page_text, self.content_snippet]
-            if part
-        )
-
 
 @dataclass
-class Cluster:
-    """A semantically coherent group of PDFs."""
+class DocumentClassification:
+    """Structured first-pass classification result from the LLM."""
 
-    cluster_id: str
-    member_sha256: list[str]
-    folder_name: str
+    title: str
+    document_type: str
+    topic: str
+    suggested_category: str
+    confidence: float
     short_reason: str
+    raw_response: str | None = None
+    from_cache: bool = False
 
 
 @dataclass
-class DuplicateCandidate:
-    """Likely duplicate relation between two files."""
+class CategoryOptimizationResult:
+    """Global category simplification result from the LLM."""
 
-    left_sha256: str
-    right_sha256: str
-    reason: str
-    similarity: float
+    category_mapping: dict[str, str]
+    normalized_categories: list[str]
+    short_reason: str
+    raw_response: str | None = None
+    from_cache: bool = False
 
 
 @dataclass
 class FileAction:
-    """Planned or executed move operation for a single PDF."""
+    """Planned or executed filesystem move/rename operation."""
 
     source_path: str
     target_path: str
-    folder_name: str
+    optimized_category: str
     title_used: str
     dry_run: bool
     executed: bool
@@ -65,32 +59,31 @@ class FileAction:
 
 @dataclass
 class FileReportItem:
-    """Per-file result in the run report."""
+    """Combined per-file result entry in the final run report."""
 
     pdf: PdfRecord
-    cluster_id: str
-    cluster_name: str
+    classification: DocumentClassification | None
+    optimized_category: str
     action: FileAction | None
 
 
 @dataclass
 class RunSummary:
-    """Aggregate counters for the run."""
+    """Summary counts for run-level reporting."""
 
     scanned_files: int = 0
     extracted_success: int = 0
     extracted_failed: int = 0
-    clusters_created: int = 0
+    classified_success: int = 0
+    classified_failed: int = 0
     actions_planned: int = 0
     actions_executed: int = 0
     actions_failed: int = 0
-    exact_duplicates: int = 0
-    likely_duplicates: int = 0
 
 
 @dataclass
 class RunReport:
-    """Top-level report payload for the CLI run."""
+    """Top-level JSON report payload for the CLI run."""
 
     started_at: str
     finished_at: str
@@ -99,9 +92,8 @@ class RunReport:
     model: str
     max_pages: int
     summary: RunSummary
-    clusters: list[Cluster] = field(default_factory=list)
+    category_optimization: CategoryOptimizationResult
     files: list[FileReportItem] = field(default_factory=list)
-    duplicates: list[DuplicateCandidate] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
